@@ -282,10 +282,6 @@ class FCProcessor(DataProcessor):
             label = line[2]   # third column = label
             examples.append(
                 InputExample(guid=guid, text_a=text_a, label=str(label)))
-            # Print the first three appended examples
-        if i < 3:
-            print(
-                f"Appended Example {i+1}: guid={examples.guid}, text_a={examples.text_a}, label={examples.label}")
         return examples
 
     def get_unlabel_examples(self, data_dir):
@@ -298,11 +294,13 @@ class FCProcessor(DataProcessor):
         for (i, line) in enumerate(lines[1:]):
             guid = "%s-%s" % ('uns', i)
             text_a = line[0]  # first column = text
-            label = line[1]  # second column = label
+            # label = line[1]  # second column = label
             src_examples.append(
-                InputExample(guid=guid, text_a=text_a, label=label))
+                # InputExample(guid=guid, text_a=text_a, label=label))
+                InputExample(guid=guid, text_a=text_a))
             trg_examples.append(
-                InputExample(guid=guid, text_a=text_a, label=label))
+                # InputExample(guid=guid, text_a=text_a, label=label))
+                InputExample(guid=guid, text_a=text_a))
 
         return src_examples, trg_examples
 
@@ -317,8 +315,8 @@ class FCProcessor(DataProcessor):
         trg_examples = []
         for (i, line) in enumerate(src_lines[1:]):
             guid = "dev-%d" % (i)
-            text_a = line[1]  # first column = text
-            label = line[2]   # second column = label
+            text_a = line[0]  # first column = text
+            label = line[1]   # second column = label
             src_examples.append(
                 InputExample(guid=guid, text_a=text_a, label=str(label)))
         for (i, line) in enumerate(trg_lines[1:]):
@@ -328,7 +326,8 @@ class FCProcessor(DataProcessor):
             trg_examples.append(
                 InputExample(guid=guid, text_a=text_a, label=label))
 
-        return src_examples, trg_examples
+        # return src_examples, trg_examples
+        return trg_examples
 
     def get_labels(self):
         """See base class."""
@@ -342,8 +341,9 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
 
     features = []
     for (ex_index, example) in enumerate(examples):
+
         # Debug: print the value of example.label before using label_map
-        print(f"Example {ex_index + 1}: label = {example.label}")
+        # print(f"Example {ex_index + 1}: label = {example.label}")
 
         tokens_a = tokenizer.tokenize(example.text_a)
 
@@ -377,6 +377,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         # For classification tasks, the first vector (corresponding to [CLS]) is
         # used as as the "sentence vector". Note that this only makes sense because
         # the entire model is fine-tuned.
+
         tokens = ["[CLS]"] + tokens_a + ["[SEP]"]
         segment_ids = [0] * len(tokens)
 
@@ -400,7 +401,9 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
         assert len(input_mask) == max_seq_length
         assert len(segment_ids) == max_seq_length
 
-        label_id = label_map[example.label]
+        # Modified to handle a truly unlabeled dataset.
+        label_id = label_map[example.label] if example.label is not None else -1
+
         if ex_index < 5:
             logger.info("*** Example ***")
             logger.info("guid: %s" % (example.guid))
@@ -486,11 +489,14 @@ def sort(train_examples, eval_examples, label_list, id2conf, num_k):
 
 
 def train(model, optimizer, train_examples, eval_examples, best_acc, args):
+
     src_train_features = train_examples
+
     logger.info("***** Running training *****")
     logger.info("  Num examples = %d", len(train_examples))
     logger.info("  Batch size = %d", args.train_batch_size)
     logger.info("  Num steps = %d", args.num_train_steps)
+
     src_input_ids = torch.tensor(
         [f.input_ids for f in src_train_features], dtype=torch.long)
     src_input_mask = torch.tensor(
@@ -506,15 +512,19 @@ def train(model, optimizer, train_examples, eval_examples, best_acc, args):
         train_sampler = RandomSampler(train_data)
     else:
         train_sampler = DistributedSampler(train_data)
+
     train_dataloader = DataLoader(
         train_data, sampler=train_sampler, batch_size=args.train_batch_size)
 
     if args.adv_training:
         fgm = FGM(model)
+
     model.train()
+
     for _ in trange(int(args.num_train_epochs), desc="Epoch"):
         tr_loss = 0
         nb_tr_examples, nb_tr_steps = 0, 0
+
         for step, batch in enumerate(tqdm(train_dataloader, desc="Iteration")):
             batch = tuple(t.to(args.device) for t in batch)
             input_ids, input_mask, segment_ids, label_ids = batch
@@ -524,6 +534,7 @@ def train(model, optimizer, train_examples, eval_examples, best_acc, args):
 
             if args.n_gpu > 1:
                 loss = loss.mean()  # mean() to average on multi-gpu.
+
             if args.gradient_accumulation_steps > 1:
                 loss = loss / args.gradient_accumulation_steps
 
@@ -544,6 +555,7 @@ def train(model, optimizer, train_examples, eval_examples, best_acc, args):
             tr_loss += loss.item()
             nb_tr_examples += input_ids.size(0)
             nb_tr_steps += 1
+
             if (step + 1) % args.gradient_accumulation_steps == 0:
                 # modify learning rate with special warm up BERT uses
                 lr_this_step = args.learning_rate * warmup_linear(args.global_step / args.t_total,
@@ -556,9 +568,11 @@ def train(model, optimizer, train_examples, eval_examples, best_acc, args):
 
         # validation starts
         eval_s_features = eval_examples
+
         logger.info("***** Running evaluation *****")
         logger.info("  Num examples = %d", len(eval_examples))
         logger.info("  Batch size = %d", args.eval_batch_size)
+
         src_input_ids = torch.tensor(
             [f.input_ids for f in eval_s_features], dtype=torch.long)
         src_input_mask = torch.tensor(
@@ -569,12 +583,14 @@ def train(model, optimizer, train_examples, eval_examples, best_acc, args):
             [f.label_id for f in eval_s_features], dtype=torch.long)
         eval_data = TensorDataset(
             src_input_ids, src_input_mask, src_segment_ids, src_label_ids)
+
         # Run prediction for full data
         eval_sampler = SequentialSampler(eval_data)
         eval_dataloader = DataLoader(
             eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
         model.eval()
+
         eval_loss, eval_accuracy = 0, 0
         nb_eval_steps, nb_eval_examples = 0, 0
         pred_l, true_l = [], []
@@ -620,15 +636,18 @@ def train(model, optimizer, train_examples, eval_examples, best_acc, args):
             # output_model_file = os.path.join(args.output_dir, "pytorch_model.bin")
             torch.save(model_to_save.state_dict(), args.output_model_file)
         model.train()
+
     return best_acc
 
 
 def eval(model, train_example, eval_examples, label_list, args):
 
     eval_s_features = eval_examples
+
     logger.info("***** Running evaluation *****")
     logger.info("  Num examples = %d", len(eval_examples))
     logger.info("  Batch size = %d", args.eval_batch_size)
+
     src_input_ids = torch.tensor(
         [f.input_ids for f in eval_s_features], dtype=torch.long)
     src_input_mask = torch.tensor(
@@ -639,20 +658,21 @@ def eval(model, train_example, eval_examples, label_list, args):
         [f.label_id for f in eval_s_features], dtype=torch.long)
     eval_data = TensorDataset(
         src_input_ids, src_input_mask, src_segment_ids, src_label_ids)
+
     # Run prediction for full data
     eval_sampler = SequentialSampler(eval_data)
     eval_dataloader = DataLoader(
         eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
 
     model.eval()
+
     eval_loss, eval_accuracy = 0, 0
     nb_eval_steps, nb_eval_examples = 0, 0
     pred_l, true_l = [], []
     reps = []
     labels = []
     cons_r = 0
-    # variable for self-training:
-    id2maxp = []
+    id2maxp = []  # variable for self-training:
 
     for batch in eval_dataloader:
         batch = tuple(t.to(args.device) for t in batch)
@@ -689,6 +709,7 @@ def eval(model, train_example, eval_examples, label_list, args):
             train_example, eval_examples, label_list, id2maxp, args.num_k)
     else:
         ud_train_examples, ud_unlabel_examples = train_example, eval_examples
+
     pred_l = np.concatenate(pred_l, axis=None)
     true_l = np.concatenate(true_l, axis=None)
     f1 = f1_score(true_l, pred_l, average='micro')
@@ -700,12 +721,14 @@ def eval(model, train_example, eval_examples, label_list, args):
               'global_step': args.global_step,
               'loss': args.tr_loss / args.nb_tr_steps,
               'f1': f1}
+
     output_eval_file = os.path.join(args.output_dir, "eval_results.txt")
     with open(output_eval_file, "w") as writer:
         logger.info("***** Eval results *****")
         for key in sorted(result.keys()):
             logger.info("  %s = %s", key, str(result[key]))
             writer.write("%s = %s\n" % (key, str(result[key])))
+
     return ud_train_examples, ud_unlabel_examples
 
 
