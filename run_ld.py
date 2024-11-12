@@ -460,6 +460,20 @@ def warmup_linear(x, warmup=0.002):
 
 
 def sort(train_examples, eval_examples, label_list, id2conf, num_k):
+    """
+    Sorts and selects high-confidence examples for self-training.
+
+    Args:
+        train_examples: Initial training examples.
+        eval_examples: Unlabeled examples to be pseudo-labeled.
+        label_list: List of possible labels for classification.
+        id2conf: List of tuples containing (soft_label, confidence) for each example.
+        num_k: Number of high-confidence examples to select per class.
+
+    Returns:
+        Updated training and unlabeled examples.
+    """
+
     label2id = {}
     id2train = []
     ud_train_examples, ud_unlabel_examples = train_examples, eval_examples
@@ -481,6 +495,10 @@ def sort(train_examples, eval_examples, label_list, id2conf, num_k):
             ex = eval_examples[i2c[0]]
             ex.label_id = i
             ud_train_examples.append(ex)
+
+        # Log the number of high-confidence examples selected for each class
+        logger.info(
+            f"Class {i} has {len(sorted_i2cs[:num_k])} high-confidence examples")
 
     for index in sorted(id2train, reverse=True):
         del ud_unlabel_examples[index]
@@ -640,7 +658,70 @@ def train(model, optimizer, train_examples, eval_examples, best_acc, args):
     return best_acc
 
 
-def eval(model, train_example, eval_examples, label_list, args):
+def predict(model, train_examples, eval_examples, label_list, args):
+    '''
+    Derived from eval(), this function is specifically designed to predict labels 
+    and confidence scores for the unlabeled dataset in a self-training setup. 
+
+    Args:
+        model: The trained model used for making predictions.
+        train_examples: Training examples to be expanded with high-confidence predictions.
+        unlabel_examples: Unlabeled examples to be labeled and added to the training set.
+        label_list: List of possible labels for classification.
+        args: Configuration arguments for model parameters, and batch sizes.
+
+    Returns:
+        Updated training examples (including confidently predicted unlabeled examples) 
+        and remaining unlabeled examples.
+    '''
+
+    eval_s_features = eval_examples
+
+    logger.info("***** Running prediction *****")
+    logger.info("  Num examples = %d", len(eval_examples))
+    logger.info("  Batch size = %d", args.eval_batch_size)
+
+    src_input_ids = torch.tensor(
+        [f.input_ids for f in eval_s_features], dtype=torch.long)
+    src_input_mask = torch.tensor(
+        [f.input_mask for f in eval_s_features], dtype=torch.long)
+    src_segment_ids = torch.tensor(
+        [f.segment_ids for f in eval_s_features], dtype=torch.long)
+    eval_data = TensorDataset(
+        src_input_ids, src_input_mask, src_segment_ids)
+
+    # Run prediction for full data
+    eval_sampler = SequentialSampler(eval_data)
+    eval_dataloader = DataLoader(
+        eval_data, sampler=eval_sampler, batch_size=args.eval_batch_size)
+
+    model.eval()
+
+    id2maxp = []  # variable for self-training:
+
+    for batch in eval_dataloader:
+        batch = tuple(t.to(args.device) for t in batch)
+        src_input_ids, src_input_mask, src_segment_ids = batch
+
+        with torch.no_grad():
+            logits, _ = model(
+                src_input_ids, src_segment_ids, src_input_mask)
+
+        logits = torch.nn.functional.softmax(logits)
+        logits = logits.detach().cpu().numpy()
+
+        soft_label = np.argmax(logits, axis=1)
+        confi = np.max(logits, axis=1)
+        for i in range(len(soft_label)):
+            id2maxp.append((soft_label[i], confi[i]))
+
+    ud_train_examples, ud_unlabel_examples = sort(
+        train_examples, eval_examples, label_list, id2maxp, args.num_k)
+
+    return ud_train_examples, ud_unlabel_examples
+
+
+def eval(model, train_examples, eval_examples, label_list, args):
 
     eval_s_features = eval_examples
 
@@ -706,9 +787,12 @@ def eval(model, train_example, eval_examples, label_list, args):
 
     if args.self_train:
         ud_train_examples, ud_unlabel_examples = sort(
-            train_example, eval_examples, label_list, id2maxp, args.num_k)
+            train_examples, eval_examples, label_list, id2maxp, args.num_k)
     else:
-        ud_train_examples, ud_unlabel_examples = train_example, eval_examples
+        ud_train_examples, ud_unlabel_examples = train_examples, eval_examples
+
+    ud_train_examples, ud_unlabel_examples = sort(
+        train_examples, eval_examples, label_list, id2maxp, args.num_k)
 
     pred_l = np.concatenate(pred_l, axis=None)
     true_l = np.concatenate(true_l, axis=None)
@@ -852,7 +936,7 @@ def main():
     num_labels_task = {
         'mld': 4,
         'cly': 5,
-        'fc': 15,
+        'fc': 15
     }
 
     if args.local_rank == -1 or args.no_cuda:
@@ -940,10 +1024,10 @@ def main():
     else:
         src_train_features = None
 
-    ul_s_features = convert_examples_to_features(
+    ul_features = convert_examples_to_features(
         unlabel_examples[0], label_list, args.max_seq_length, tokenizer)
 
-    ud_train_fea, ud_unlabel_fea = src_train_features, ul_s_features
+    ud_train_fea, ud_unlabel_fea = src_train_features, ul_features
 
     eval_features = convert_examples_to_features(
         eval_examples, label_list, args.max_seq_length, tokenizer)
@@ -1016,7 +1100,9 @@ def main():
                              eval_features, best_acc, args)
 
             if args.self_train and time != self_train_time-1:
-                ud_train_fea, ud_unlabel_fea = eval(
+                # ud_train_fea, ud_unlabel_fea = eval(
+                #     model, ud_train_fea, ud_unlabel_fea, label_list, args)
+                ud_train_fea, ud_unlabel_fea = predict(
                     model, ud_train_fea, ud_unlabel_fea, label_list, args)
 
     args.self_train = False

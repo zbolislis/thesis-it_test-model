@@ -28,7 +28,7 @@
   --max_seq_length 128 \
   --train_batch_size 16 \
   --learning_rate 2e-5 \
-  --num_k 1 \
-  --num_self_train 1 \
-  --num_train_epochs 3.0 \
-  --output_dir /tmp/mbert-sl_output/
+  --num_k 5 \
+  --num_self_train 2 \
+  --num_train_epochs 1.0 \
+  --output_dir ./tmp/mbert-sl_output/
